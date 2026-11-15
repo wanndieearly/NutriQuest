@@ -1,9 +1,10 @@
 package com.nutriquest.app
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.net.Uri
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
@@ -12,258 +13,205 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.io.File
-import java.util.concurrent.Executor
+import java.io.IOException
 
-/**
- * CameraX capture screen.
- *
- * This version implements real camera permission, live preview and photo capture.
- * Food recognition is deliberately not faked: a food-specific multi-object
- * detection model must be added before we can return genuine food labels.
- */
 @Composable
-fun CameraScreen(onOpenDiary: () -> Unit) {
+internal fun CameraScreen(
+    onPhotoCaptured: (File) -> Unit,
+    onEnterManually: () -> Unit,
+    onImportPhoto: (Uri) -> Unit,
+    importingPhoto: Boolean,
+    photoError: String?
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val mainExecutor: Executor = remember(context) {
-        ContextCompat.getMainExecutor(context)
-    }
-
-    var hasCameraPermission by remember {
-        mutableStateOf(
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
-        )
-    }
-
-    var permissionMessage by remember { mutableStateOf<String?>(null) }
-    var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var captureError by remember { mutableStateOf<String?>(null) }
-    var isCapturing by remember { mutableStateOf(false) }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasCameraPermission = granted
-        if (!granted) {
-            permissionMessage = "Camera permission is required to scan a meal."
-        }
-    }
-
-    val previewView = remember {
+    val currentOnPhotoCaptured by rememberUpdatedState(onPhotoCaptured)
+    val executor = remember(context) { ContextCompat.getMainExecutor(context) }
+    val previewView = remember(context) {
         PreviewView(context).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
             implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         }
     }
-
-    val imageCapture = remember {
-        ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .build()
+    var hasPermission by remember(context) {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
+    var permissionDenied by remember { mutableStateOf(false) }
+    var boundCapture by remember { mutableStateOf<ImageCapture?>(null) }
+    var isCapturing by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        hasPermission = it
+        permissionDenied = !it
     }
 
     LaunchedEffect(Unit) {
-        if (!hasCameraPermission) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
-        }
+        if (!hasPermission) permission.launch(Manifest.permission.CAMERA)
     }
 
-    DisposableEffect(hasCameraPermission, lifecycleOwner) {
-        if (hasCameraPermission) {
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-            val listener = Runnable {
-                try {
-                    val cameraProvider = cameraProviderFuture.get()
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
-
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        preview,
-                        imageCapture
-                    )
-                } catch (exception: Exception) {
-                    captureError = "Could not start camera: ${exception.localizedMessage}"
-                }
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                    PackageManager.PERMISSION_GRANTED
             }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
-            cameraProviderFuture.addListener(listener, mainExecutor)
+    DisposableEffect(hasPermission, lifecycleOwner, previewView) {
+        var active = true
+        var provider: ProcessCameraProvider? = null
+        val preview = Preview.Builder().build()
+        val capture = ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .build()
 
-            onDispose {
-                try {
-                    if (cameraProviderFuture.isDone) {
-                        cameraProviderFuture.get().unbindAll()
+        if (hasPermission) {
+            val future = ProcessCameraProvider.getInstance(context)
+            future.addListener({
+                if (active) {
+                    try {
+                        val cameraProvider = future.get()
+                        provider = cameraProvider
+                        if (cameraProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) {
+                            preview.surfaceProvider = previewView.surfaceProvider
+                            cameraProvider.bindToLifecycle(
+                                lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture
+                            )
+                            boundCapture = capture
+                            error = null
+                        } else {
+                            error = "No rear camera is available on this device."
+                        }
+                    } catch (_: Exception) {
+                        error = "The camera couldn’t start. You can still log this meal by hand."
                     }
-                } catch (_: Exception) {
-                    // Camera may not have finished initializing yet.
                 }
-            }
-        } else {
-            onDispose { }
+            }, executor)
+        }
+
+        onDispose {
+            active = false
+            boundCapture = null
+            isCapturing = false
+            provider?.unbind(preview, capture)
         }
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(
-            "Food Scanner 📷",
-            style = MaterialTheme.typography.headlineMedium
-        )
+        Text("Snap your plate 📸", style = MaterialTheme.typography.headlineMedium, color = NutriGreen)
         Spacer(Modifier.height(6.dp))
-        Text(
-            "Capture your whole meal. We'll identify the foods separately.",
-            style = MaterialTheme.typography.bodyMedium
-        )
+        Text("Take a photo, then build your meal in the Quest Kitchen.")
         Spacer(Modifier.height(14.dp))
 
-        if (capturedBitmap == null) {
-            if (hasCameraPermission) {
-                AndroidView(
-                    factory = { previewView },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .then(Modifier),
-                )
-            } else {
-                Spacer(Modifier.weight(1f))
-                Text(
-                    permissionMessage ?: "Waiting for camera permission...",
-                    color = MaterialTheme.colorScheme.error
-                )
-                Button(
-                    onClick = {
-                        permissionLauncher.launch(Manifest.permission.CAMERA)
-                    }
-                ) {
-                    Text("Grant camera permission")
-                }
-                Spacer(Modifier.weight(1f))
-            }
-
-            Button(
-                onClick = {
-                    if (hasCameraPermission && !isCapturing) {
-                        isCapturing = true
-                        captureError = null
-                        val photoFile = File(
-                            context.cacheDir,
-                            "nutriquest_meal_${System.currentTimeMillis()}.jpg"
-                        )
-                        val outputOptions = ImageCapture.OutputFileOptions
-                            .Builder(photoFile)
-                            .build()
-
-                        imageCapture.takePicture(
-                            outputOptions,
-                            mainExecutor,
-                            object : ImageCapture.OnImageSavedCallback {
-                                override fun onImageSaved(
-                                    outputFileResults: ImageCapture.OutputFileResults
-                                ) {
-                                    capturedBitmap = BitmapFactory.decodeFile(photoFile.absolutePath)
-                                    isCapturing = false
-                                }
-
-                                override fun onError(exception: ImageCaptureException) {
-                                    captureError = exception.localizedMessage
-                                        ?: "Photo capture failed."
-                                    isCapturing = false
-                                }
-                            }
-                        )
-                    }
-                },
-                enabled = hasCameraPermission && !isCapturing,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 12.dp),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Text(
-                    if (isCapturing) "Capturing..." else "Take meal photo",
-                    fontSize = 16.sp
-                )
+        if (hasPermission) {
+            AndroidView(
+                factory = { previewView },
+                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).aspectRatio(1f).clip(RoundedCornerShape(24.dp))
+            )
+            if (boundCapture == null && error == null) {
+                Text("Starting camera…", modifier = Modifier.padding(top = 8.dp))
             }
         } else {
-            Image(
-                bitmap = capturedBitmap!!.asImageBitmap(),
-                contentDescription = "Captured meal photo",
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            )
-
-            Spacer(Modifier.height(12.dp))
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer
-                )
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
-                Column(Modifier.padding(14.dp)) {
-                    Text(
-                        "Photo captured successfully",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Next: run the food detection model to find multiple foods in this image. No AI result is shown yet because the food model has not been installed.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                Text("Camera access lets you attach a photo to your meal.")
+                TextButton(onClick = { permission.launch(Manifest.permission.CAMERA) }) {
+                    Text("Grant camera permission")
                 }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedButton(
-                    onClick = { capturedBitmap = null },
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Retake")
-                }
-                Button(
-                    onClick = onOpenDiary,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("Open Diary")
+                if (permissionDenied) {
+                    TextButton(onClick = {
+                        context.startActivity(Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null)
+                        ))
+                    }) { Text("Open app settings") }
                 }
             }
         }
 
-        if (captureError != null) {
-            Text(
-                captureError!!,
-                color = MaterialTheme.colorScheme.error,
-                modifier = Modifier.padding(top = 8.dp)
-            )
+        error?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
         }
+
+        if (hasPermission) {
+            Button(
+                onClick = {
+                    val capture = boundCapture ?: return@Button
+                    if (isCapturing) return@Button
+                    val photo = try {
+                        File.createTempFile("nutriquest_meal_", ".jpg", context.cacheDir)
+                    } catch (_: IOException) {
+                        error = "Couldn’t create a photo. Check your available storage."
+                        return@Button
+                    }
+                    isCapturing = true
+                    error = null
+                    previewView.display?.let { capture.targetRotation = it.rotation }
+                    capture.takePicture(
+                        ImageCapture.OutputFileOptions.Builder(photo).build(),
+                        executor,
+                        object : ImageCapture.OnImageSavedCallback {
+                            override fun onImageSaved(results: ImageCapture.OutputFileResults) {
+                                if (boundCapture !== capture) {
+                                    photo.delete()
+                                    return
+                                }
+                                isCapturing = false
+                                if (photo.length() == 0L) {
+                                    photo.delete()
+                                    error = "The photo was empty. Try again."
+                                } else {
+                                    currentOnPhotoCaptured(photo)
+                                }
+                            }
+
+                            override fun onError(exception: ImageCaptureException) {
+                                photo.delete()
+                                if (boundCapture === capture) {
+                                    isCapturing = false
+                                    error = "Couldn’t take the photo. Try again."
+                                }
+                            }
+                        }
+                    )
+                },
+                enabled = boundCapture != null && !isCapturing && !importingPhoto,
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp)
+            ) {
+                Text(if (isCapturing) "Capturing…" else "Take meal photo")
+            }
+        }
+        AlbumPickerButton(enabled = !importingPhoto && !isCapturing, onPick = onImportPhoto)
+        photoError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+        TextButton(onClick = onEnterManually) { Text("Enter meal by hand") }
     }
 }

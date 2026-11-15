@@ -13,3 +13,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+/.venv/
+/backend/__pycache__/
+/app/src/debug/assets/food_detector.tflite
+/app/src/debug/assets/food_labels.txt
