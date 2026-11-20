@@ -197,7 +197,11 @@ internal class MealLogViewModel(application: Application) : AndroidViewModel(app
         roasts[key] = RoastState.Loading
         viewModelScope.launch {
             val reply = try {
-                RoastState.Ready(localChef.roast(scope, meals, key.profile, context), feedback.reminder)
+                val reminder = when (key.profile.tone) {
+                    RoastTone.ADAPTIVE, RoastTone.GENTLE -> feedback.reminder
+                    RoastTone.CHEEKY, RoastTone.SPICY, RoastTone.COCKY -> ""
+                }
+                RoastState.Ready(localChef.roast(scope, meals, key.profile, context), reminder)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: IOException) {

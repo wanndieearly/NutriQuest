@@ -19,7 +19,7 @@ class RoastPreferencesTest {
             profile
         )
         assertTrue(instructions.system.contains(profile.role.prompt))
-        assertTrue(instructions.system.contains(profile.tone.prompt))
+        assertTrue(instructions.system.contains("sharp, exaggerated punchline"))
         assertTrue(instructions.request.contains("Cook lunch at home"))
         assertTrue(instructions.request.contains("Steamed rice × 2"))
         assertTrue(instructions.request.contains("today's diary (1 logged meal)"))
@@ -37,7 +37,7 @@ class RoastPreferencesTest {
                 val instructions = roastInstructions(RoastScope.MEAL, listOf(meal), profile)
                 val gentle = roastInstructions(RoastScope.MEAL, listOf(meal), profile.copy(tone = RoastTone.GENTLE))
                 if (language == RoastLanguage.ENGLISH) {
-                    assertTrue(instructions.system.contains("deliberately annoying"))
+                    assertTrue(instructions.system.contains("smug rival"))
                     assertTrue(instructions.system.contains("accountability"))
                 } else {
                     assertTrue(instructions.system.contains("飲食目標"))
@@ -47,7 +47,7 @@ class RoastPreferencesTest {
                 assertNotEquals(gentle.system, instructions.system)
             }
         }
-        assertEquals(" Prove it.", mixedRoastSignOff(RoastTone.COCKY, RoastScope.DAY))
+        assertEquals(" That was your big play?", mixedRoastSignOff(RoastTone.COCKY, RoastScope.DAY))
         assertNotEquals(
             mixedRoastSignOff(RoastTone.GENTLE, RoastScope.MEAL),
             mixedRoastSignOff(RoastTone.COCKY, RoastScope.MEAL)

@@ -8,6 +8,9 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.util.Log
 import androidx.core.graphics.createBitmap
+import com.google.ai.edge.litert.Accelerator
+import com.google.ai.edge.litert.CompiledModel
+import com.google.ai.edge.litert.Environment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withContext
@@ -29,13 +32,18 @@ internal sealed interface FoodScan {
     data class Unavailable(val reason: String) : FoodScan
 }
 
-/** CPU detector for an Ultralytics-style float32 YOLO export without embedded NMS. */
+/** CPU photo scanner for YOLOE and the legacy YOLO detection export. */
 internal class FoodDetector(context: Context) {
     private val assets = context.applicationContext.assets
 
     suspend fun scan(photo: File): FoodScan = withContext(Dispatchers.Default) {
         try {
-            FoodScan.Ready(detect(photo))
+            val guesses = if (assets.list("").orEmpty().contains("yoloe_food_detector.tflite")) {
+                detectYoloe(photo)
+            } else {
+                detect(photo)
+            }
+            FoodScan.Ready(guesses)
         } catch (error: CancellationException) {
             throw error
         } catch (_: FileNotFoundException) {
@@ -101,6 +109,49 @@ internal class FoodDetector(context: Context) {
         }
     }
 
+    private fun detectYoloe(photo: File): List<FoodGuess> {
+        val labels = assets.open("yoloe_food_labels.tsv").bufferedReader().useLines { lines ->
+            lines.associate { row -> row.substringBefore('\t').toInt() to row.substringAfter('\t') }
+        }
+        val side = 640
+        val bitmap = decodePhoto(photo, side) ?: error("Photo could not be decoded")
+        val pixels = try {
+            FloatArray(3 * side * side).also { letterbox(bitmap, side, side, true).asFloatBuffer().get(it) }
+        } finally {
+            bitmap.recycle()
+        }
+        // The model and its buffers are created, used and closed on this background thread.
+        yoloeEnvironment.let { environment ->
+            CompiledModel.create(
+                assets, "yoloe_food_detector.tflite", CompiledModel.Options(Accelerator.CPU), environment
+            ).use { model ->
+                val inputs = model.createInputBuffers()
+                try {
+                    val outputs = model.createOutputBuffers()
+                    try {
+                        inputs.single().writeFloat(pixels)
+                        model.run(inputs, outputs)
+                        // YOLOE-26s end-to-end export: 300 rows of [xyxy, confidence, classId, 32 mask coefficients].
+                        val rows = outputs.asSequence().map { it.readFloat() }.first { it.size == 300 * 38 }
+                        return rows.indices.step(38).mapNotNull { start ->
+                            val score = rows[start + 4]
+                            val classId = rows[start + 5]
+                            if (score !in 0.35f..1f || !classId.isFinite() || classId != classId.toInt().toFloat()) {
+                                return@mapNotNull null
+                            }
+                            val label = labels[classId.toInt()] ?: return@mapNotNull null
+                            score to FoodGuess(label, catalogFood(label))
+                        }.sortedByDescending { it.first }.map { it.second }.distinctBy { it.label.lowercase() }.take(8)
+                    } finally {
+                        outputs.forEach { it.close() }
+                    }
+                } finally {
+                    inputs.forEach { it.close() }
+                }
+            }
+        }
+    }
+
     private fun letterbox(source: Bitmap, width: Int, height: Int, channelsFirst: Boolean): ByteBuffer {
         val scale = min(width / source.width.toFloat(), height / source.height.toFloat())
         val scaledWidth = source.width * scale
@@ -134,6 +185,8 @@ internal class FoodDetector(context: Context) {
         }
     }
 }
+
+private val yoloeEnvironment by lazy { Environment.create() }
 
 private val demoFoodLabels = setOf("banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake")
 
