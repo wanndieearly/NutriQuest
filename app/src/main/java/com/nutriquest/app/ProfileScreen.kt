@@ -16,7 +16,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 
 @Composable
-internal fun ProfileScreen(log: MealLogViewModel) {
+internal fun ProfileScreen(log: MealLogViewModel, account: AccountViewModel) {
     val draft = log.profileDraft
     val settings = draft.settings
     LazyColumn(
@@ -62,6 +62,19 @@ internal fun ProfileScreen(log: MealLogViewModel) {
             }
         }
         item {
+            // F1 / F2: body stats and suggested targets
+            AboutYouCard(account, settings.goal) { targets ->
+                log.editProfile(
+                    draft.copy(
+                        energy = targets.energyKcal.toString(),
+                        protein = targets.proteinGrams.toString(),
+                        carbs = targets.carbohydrateGrams.toString(),
+                        fat = targets.fatGrams.toString()
+                    )
+                )
+            }
+        }
+        item {
             ProfileSection("Daily targets") {
                 Text("Choose your own targets. These guide the progress bars.", style = MaterialTheme.typography.bodySmall)
                 ProfileNumber("Daily calories (kcal)", draft.energy) { log.editProfile(draft.copy(energy = it)) }
@@ -100,12 +113,14 @@ internal fun ProfileScreen(log: MealLogViewModel) {
                 modifier = Modifier.fillMaxWidth()
             ) { Text(if (log.savingProfile) "Saving…" else "Save profile") }
         }
+        item { RemindersCard(account) }                    // F9
+        item { AccountCard(account, log.profile.name) }    // F1
         item { RoastModelCard(log.roastModel, log::importRoastModel) }
     }
 }
 
 @Composable
-private fun ProfileSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun ProfileSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Surface(color = Color.White, shape = RoundedCornerShape(22.dp)) {
         Column(
             Modifier.fillMaxWidth().animateContentSize().padding(16.dp),
@@ -119,7 +134,7 @@ private fun ProfileSection(title: String, content: @Composable ColumnScope.() ->
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun <T> ProfileChoice(
+internal fun <T> ProfileChoice(
     label: String,
     choices: List<T>,
     selected: T,
@@ -141,7 +156,7 @@ private fun <T> ProfileChoice(
 }
 
 @Composable
-private fun ProfileNumber(label: String, value: String, onChange: (String) -> Unit) {
+internal fun ProfileNumber(label: String, value: String, onChange: (String) -> Unit) {
     OutlinedTextField(
         value = value,
         onValueChange = { onChange(it.take(6)) },

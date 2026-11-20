@@ -16,12 +16,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.File
+import java.time.LocalDate
 import java.util.UUID
 
 internal enum class AppPage(val label: String, val icon: String) {
     HOME("Home", "🏠"),
     DIARY("Diary", "📖"),
     CAMERA("Camera", "📷"),
+    GROUPS("Groups", "🏆"),   // F8
     PROFILE("Profile", "👤")
 }
 
@@ -65,6 +67,70 @@ internal class MealLogViewModel(application: Application) : AndroidViewModel(app
     private val loggedMeals = mutableStateListOf<Meal>()
     val meals: List<Meal> get() = loggedMeals
     private val roasts = mutableStateMapOf<RoastKey, RoastState>()
+
+    // ---- F6 meal storage + F7 scores (Joe) ----
+    private val mealRepository = MealRepository(application)
+    /** False until saved meals have been read from the database at start-up. */
+    var mealsLoaded by mutableStateOf(false)
+        private set
+    var storageError by mutableStateOf<String?>(null)
+        private set
+    /** The day the Diary tab is showing. */
+    var diaryDate by mutableStateOf(LocalDate.now())
+        private set
+
+    init {
+        viewModelScope.launch {
+            try {
+                val saved = mealRepository.loadMeals()
+                // Put saved meals first, skipping any already in the list
+                loggedMeals.addAll(0, saved.filter { stored -> loggedMeals.none { it.id == stored.id } })
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (BuildConfig.DEBUG) Log.w("MealStorage", "Loading saved meals failed", error)
+                storageError = "Saved meals couldn’t be loaded."
+            } finally {
+                mealsLoaded = true
+            }
+        }
+    }
+
+    fun showDiaryDay(date: LocalDate) {
+        diaryDate = minOf(date, LocalDate.now())
+    }
+
+    /** F7: the daily score for [date] against the current profile targets (null if no meals). */
+    fun scoreFor(date: LocalDate): DailyScoreResult? = dailyScore(date, loggedMeals, profile.scoreTargets())
+
+    fun deleteMeal(meal: Meal) {
+        if (!loggedMeals.remove(meal)) return
+        roasts.clear()
+        viewModelScope.launch {
+            try {
+                mealRepository.delete(meal)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                storageError = "That meal couldn’t be deleted from the phone."
+            }
+        }
+    }
+
+    private fun persist(meal: Meal) {
+        viewModelScope.launch {
+            try {
+                mealRepository.save(meal)
+                storageError = null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (BuildConfig.DEBUG) Log.w("MealStorage", "Saving a meal failed", error)
+                storageError = "This meal couldn’t be saved on the phone. It will disappear when the app closes."
+            }
+        }
+    }
+    // ---- end F6/F7 ----
 
     fun editProfile(value: ProfileDraft) {
         profileDraft = value
@@ -244,14 +310,23 @@ internal class MealLogViewModel(application: Application) : AndroidViewModel(app
         if (importingPhoto) return
         val current = draft ?: return
         if (current.items.isEmpty()) return
-        loggedMeals.add(
-            Meal(
-                name = current.name.trim().ifEmpty { "Meal ${meals.size + 1}" },
-                items = current.items,
-                photo = current.photo,
-                source = current.source
-            )
+        // F6: move the photo out of the temporary cache so it survives restarts
+        val photo = try {
+            mealRepository.keepPhoto(current.photo)
+        } catch (_: IOException) {
+            current.photo
+        }
+        val mealsToday = loggedMeals.count { it.loggedAt.toLocalDate() == LocalDate.now() }
+        val meal = Meal(
+            name = current.name.trim().ifEmpty { "Meal ${mealsToday + 1}" },
+            items = current.items,
+            photo = photo,
+            source = current.source,
+            score = mealScore(current.items, profile.scoreTargets())   // F7: meal fit score
         )
+        loggedMeals.add(meal)
+        persist(meal)                                                   // F6: save to the database
+        diaryDate = meal.loggedAt.toLocalDate()
         roasts.clear()
         draft = null
         editing = false
@@ -259,7 +334,7 @@ internal class MealLogViewModel(application: Application) : AndroidViewModel(app
     }
 
     override fun onCleared() {
+        // Only the unsaved draft photo is temporary; saved meal photos are kept (F6)
         draft?.photo?.delete()
-        meals.forEach { it.photo?.delete() }
     }
 }

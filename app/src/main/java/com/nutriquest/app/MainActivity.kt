@@ -39,6 +39,8 @@ internal val NutriCream = Color(0xFFF7F6EE)
 
 class MainActivity : ComponentActivity() {
     private val mealLog by viewModels<MealLogViewModel>()
+    private val groups by viewModels<GroupsViewModel>()   // F8
+    private val account by viewModels<AccountViewModel>() // F1 / F9
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,7 +55,7 @@ class MainActivity : ComponentActivity() {
                     secondaryContainer = Color(0xFFE5F0DF)
                 )
             ) {
-                NutriQuestApp(mealLog)
+                NutriQuestApp(mealLog, groups, account)
             }
         }
     }
@@ -64,8 +66,22 @@ class MainActivity : ComponentActivity() {
 // --------------------------------------------------
 
 @Composable
-private fun NutriQuestApp(log: MealLogViewModel) {
+private fun NutriQuestApp(log: MealLogViewModel, groups: GroupsViewModel, account: AccountViewModel) {
     val draft = log.draft
+    // F8: upload daily scores to the groups server whenever meals or targets change
+    LaunchedEffect(log.mealsLoaded, log.meals.size, log.profile, groups.nickname, groups.serverUrl) {
+        if (log.mealsLoaded) groups.syncScores(log::scoreFor)
+    }
+    // F1: first-launch setup creates the local account
+    if (!account.setupDone) {
+        OnboardingScreen(
+            initial = log.profile,
+            initialBody = account.bodyDraft,
+            onFinish = { result -> completeSetup(result, log, groups, account) },
+            onSkip = account::skipSetup
+        )
+        return
+    }
     BackHandler(enabled = draft != null, onBack = log::cancelDraft)
     val pages = rememberSaveableStateHolder()
     AnimatedContent(
@@ -95,13 +111,21 @@ private fun NutriQuestApp(log: MealLogViewModel) {
                 Spacer(Modifier.fillMaxSize())
             }
         } else {
-            NutriQuestTabs(log, pages)
+            NutriQuestTabs(log, pages, groups, account)
         }
     }
 }
 
+/** F1: saves what the setup screens collected into the profile, the Groups nickname and the account. */
+private fun completeSetup(result: SetupResult, log: MealLogViewModel, groups: GroupsViewModel, account: AccountViewModel) {
+    log.editProfile(ProfileDraft(result.applyTo(log.profile)))
+    log.saveProfile()
+    groups.saveSettings(result.name, groups.serverUrl)
+    account.finishSetup(result)
+}
+
 @Composable
-private fun NutriQuestTabs(log: MealLogViewModel, pages: SaveableStateHolder) {
+private fun NutriQuestTabs(log: MealLogViewModel, pages: SaveableStateHolder, groups: GroupsViewModel, account: AccountViewModel) {
     Scaffold(
         containerColor = NutriCream,
         bottomBar = {
@@ -129,7 +153,7 @@ private fun NutriQuestTabs(log: MealLogViewModel, pages: SaveableStateHolder) {
         ) { page ->
             pages.SaveableStateProvider(page.name) {
                 when (page) {
-                    AppPage.HOME -> HomeScreen(log.meals, log.profile, log::startMeal)
+                    AppPage.HOME -> HomeScreen(log.meals, log.profile, log.scoreFor(LocalDate.now()), log::startMeal)
                     AppPage.DIARY -> DiaryScreen(log)
                     AppPage.CAMERA -> if (log.page == page && !log.editing) {
                         CameraScreen(
@@ -142,7 +166,8 @@ private fun NutriQuestTabs(log: MealLogViewModel, pages: SaveableStateHolder) {
                     } else {
                         Spacer(Modifier.fillMaxSize())
                     }
-                    AppPage.PROFILE -> ProfileScreen(log)
+                    AppPage.GROUPS -> GroupsScreen(groups, log.profile.name)   // F8
+                    AppPage.PROFILE -> ProfileScreen(log, account)
                 }
             }
         }
@@ -158,6 +183,7 @@ private fun NutriQuestTabs(log: MealLogViewModel, pages: SaveableStateHolder) {
 private fun HomeScreen(
     meals: List<Meal>,
     profile: UserProfile,
+    todayScore: DailyScoreResult?,
     onAddMeal: () -> Unit
 ) {
     val (totalCalories, totalProtein, totalCarbs, totalFat) = meals.todayNutrition()
@@ -258,6 +284,10 @@ private fun HomeScreen(
             }
         }
 
+        item(key = "daily-score") {
+            DailyScoreCard(todayScore)   // F7
+        }
+
         item {
             Text("Today's Nutrition", fontSize = 21.sp, fontWeight = FontWeight.Bold)
             Card(
@@ -293,7 +323,7 @@ private fun HomeScreen(
                 Text("No meals yet. Start your first quest!", color = Color.Gray)
             }
         } else {
-            items(meals.asReversed(), key = { it.id.toString() }) { meal ->
+            items(meals.asReversed().take(5), key = { it.id.toString() }) { meal ->
                 MealCard(meal)
             }
         }
@@ -314,11 +344,12 @@ private fun HomeScreen(
 
 @Composable
 private fun DiaryScreen(log: MealLogViewModel) {
-    val meals = log.meals
     val profile = log.profile
-    val today = meals.loggedToday()
+    val date = log.diaryDate                                    // F6: day being browsed
+    val isToday = date == LocalDate.now()
+    val dayMeals = log.meals.filter { it.loggedAt.toLocalDate() == date }
     val onAddMeal = log::startMeal
-    val (totalCalories, totalProtein, totalCarbs, totalFat) = meals.todayNutrition()
+    val (totalCalories, totalProtein, totalCarbs, totalFat) = dayMeals.flatMap { it.items }.nutrition()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -337,6 +368,8 @@ private fun DiaryScreen(log: MealLogViewModel) {
                 color = Color.Gray,
                 modifier = Modifier.padding(top = 4.dp)
             )
+            DiaryDayPicker(date, log::showDiaryDay)
+            log.storageError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
 
         item {
@@ -346,7 +379,7 @@ private fun DiaryScreen(log: MealLogViewModel) {
                 colors = CardDefaults.cardColors(containerColor = Color(0xFFE5F0DF))
             ) {
                 Column(Modifier.padding(18.dp)) {
-                    Text("TODAY'S SUMMARY", color = NutriGreen, fontWeight = FontWeight.Bold)
+                    Text(if (isToday) "TODAY'S SUMMARY" else "DAY SUMMARY", color = NutriGreen, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
                     Text(
                         "$totalCalories kcal",
@@ -374,6 +407,12 @@ private fun DiaryScreen(log: MealLogViewModel) {
             }
         }
 
+        if (dayMeals.isNotEmpty()) {
+            item(key = "diary-score") {
+                DailyScoreCard(log.scoreFor(date))   // F7
+            }
+        }
+
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -391,12 +430,16 @@ private fun DiaryScreen(log: MealLogViewModel) {
             }
         }
 
-        if (today.isNotEmpty()) {
+        if (dayMeals.isNotEmpty()) {
             item(key = "day-roast") {
-                DiaryRoast(log, RoastScope.DAY, today)
+                DiaryRoast(log, RoastScope.DAY, dayMeals)
             }
         }
-        if (meals.isEmpty()) {
+        if (dayMeals.isEmpty() && !isToday) {
+            item {
+                Text("No meals logged on this day.", color = Color.Gray)
+            }
+        } else if (dayMeals.isEmpty()) {
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -426,10 +469,13 @@ private fun DiaryScreen(log: MealLogViewModel) {
                 }
             }
         } else {
-            items(meals.asReversed(), key = { it.id.toString() }) { meal ->
+            items(dayMeals.asReversed(), key = { it.id.toString() }) { meal ->
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     MealCard(meal)
                     DiaryRoast(log, RoastScope.MEAL, listOf(meal))
+                    TextButton(onClick = { log.deleteMeal(meal) }) {   // F6
+                        Text("🗑 Delete meal", color = Color.Gray, fontSize = 12.sp)
+                    }
                 }
             }
         }
@@ -491,7 +537,10 @@ private fun MealCard(meal: Meal) {
         shape = RoundedCornerShape(18.dp)
     ) {
         Column(Modifier.padding(16.dp)) {
-            Text(meal.name, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(meal.name, fontWeight = FontWeight.Bold, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                MealScoreChip(meal.score)   // F7
+            }
             Spacer(Modifier.height(6.dp))
             meal.photo?.let {
                 MealPhoto(it, modifier = Modifier.fillMaxWidth().height(108.dp), maxSize = 480)

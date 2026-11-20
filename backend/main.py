@@ -8,6 +8,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, StringConstraints
 
 app = FastAPI(title="NutriRoast")
+
+# F8 (Joe): groups, daily scores and leaderboard. See groups.py
+from groups import router as groups_router  # noqa: E402
+app.include_router(groups_router)
 MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:1.5b")
 CHAT_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/") + "/api/chat"
 ShortName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]

@@ -17,3 +17,4 @@ local.properties
 /backend/__pycache__/
 /app/src/debug/assets/food_detector.tflite
 /app/src/debug/assets/food_labels.txt
+/backend/nutriquest_groups.db

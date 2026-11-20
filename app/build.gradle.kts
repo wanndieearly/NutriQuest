@@ -2,6 +2,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.ksp)            // F6: generates Room database code
 }
 
 android {
@@ -36,6 +37,11 @@ android {
     }
 
     // Enable Jetpack Compose
+    // Robolectric tests need Android resources available on the computer
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+
     buildFeatures {
         compose = true
         buildConfig = true
@@ -80,4 +86,15 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.litert)
     implementation(libs.litertlm)
+
+    // F6: meal storage (Room database)
+    implementation(libs.androidx.room.runtime)
+    ksp(libs.androidx.room.compiler)
+    // F6: lets MealStorageTest run Android + Room code on the computer (tests only)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+
+    // F9: daily reminder (WorkManager)
+    implementation(libs.work.runtime.ktx)
+    testImplementation(libs.work.testing)
 }
